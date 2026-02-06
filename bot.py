@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Bitcoin Trading Bot - Fetches Robinhood data and generates buy/sell signals.
+Bitcoin Trading Signal Bot - ADVISORY ONLY.
 
-This bot does NOT execute trades automatically. It provides recommendations
-based on technical analysis so you can make informed decisions.
+This bot ONLY reads market data and prints recommendations.
+It will NEVER place, modify, or cancel any orders.
+All trading decisions must be made and executed by you manually.
 
 Usage:
     python bot.py              # Run once and print signal
@@ -14,6 +15,7 @@ Usage:
 import os
 import sys
 import argparse
+import getpass
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -23,11 +25,55 @@ import signals
 
 
 BANNER = """
-╔══════════════════════════════════════════════╗
-║         Bitcoin Trading Signal Bot           ║
-║       Powered by Robinhood Market Data       ║
-╚══════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════╗
+║          Bitcoin Trading Signal Bot              ║
+║        Powered by Robinhood Market Data          ║
+║                                                  ║
+║  *** ADVISORY ONLY - NO TRADES ARE EXECUTED ***  ║
+║  This bot will NEVER buy or sell on your behalf. ║
+║  You must place all trades yourself manually.    ║
+╚══════════════════════════════════════════════════╝
 """
+
+DISCLAIMER = (
+    "  [!] REMINDER: This is a SIGNAL ONLY. No order has been placed.\n"
+    "  [!] You must manually decide whether and how to act on this."
+)
+
+
+def prompt_credentials() -> tuple[str, str, str | None]:
+    """
+    Interactively prompt the user for Robinhood credentials.
+    Password input is hidden (not echoed to the terminal).
+    """
+    print("  ── Robinhood Login ──────────────────────────")
+    print("  Your credentials are used only for this session")
+    print("  and are never saved to disk or sent anywhere.\n")
+
+    username = input("  Email:    ").strip()
+    password = getpass.getpass("  Password: ")
+
+    totp = input("  2FA TOTP secret (press Enter to skip): ").strip() or None
+
+    print()
+    return username, password, totp
+
+
+def get_credentials() -> tuple[str, str, str | None]:
+    """
+    Get credentials from .env file if available, otherwise prompt interactively.
+    Always prefer the interactive prompt if .env credentials are missing.
+    """
+    username = os.getenv("ROBINHOOD_USERNAME", "").strip()
+    password = os.getenv("ROBINHOOD_PASSWORD", "").strip()
+    totp = os.getenv("ROBINHOOD_TOTP", "").strip() or None
+
+    # If .env has placeholder or empty values, prompt instead
+    if not username or not password or username == "your_email@example.com":
+        return prompt_credentials()
+
+    print(f"  Using credentials from .env for {username}")
+    return username, password, totp
 
 
 def format_result(result: signals.AnalysisResult) -> str:
@@ -60,12 +106,13 @@ def format_result(result: signals.AnalysisResult) -> str:
         lines.append(f"    - {reason}")
 
     lines.append("")
-    lines.append("  " + "=" * 44)
+    lines.append(DISCLAIMER)
+    lines.append("  " + "=" * 50)
     return "\n".join(lines)
 
 
 def run_once():
-    """Fetch data, analyze, and print the signal."""
+    """Fetch data, analyze, and print the signal. NEVER places trades."""
     print("  Fetching Bitcoin data from Robinhood...")
 
     # Get hourly data for the past month (gives ~720 data points)
@@ -79,7 +126,7 @@ def run_once():
 
 
 def run_loop(interval_minutes: int):
-    """Run the bot continuously on a schedule."""
+    """Run the bot continuously on a schedule. NEVER places trades."""
     import schedule
     import time
 
@@ -105,7 +152,7 @@ def run_loop(interval_minutes: int):
 def run_backtest():
     """
     Simple backtest: replay historical data and simulate signals.
-    Uses daily data over the past year.
+    Uses daily data over the past year. NEVER places trades.
     """
     print("  Running backtest on daily data (past year)...\n")
 
@@ -149,13 +196,18 @@ def run_backtest():
         all_signals.sort(key=lambda x: x[0])
         for ts, price, sig, sc, _ in all_signals[-20:]:
             print(f"  {str(ts):<22} {sig:<14} ${price:>10,.2f} {sc:>+6.0f}")
+
+    print()
+    print(DISCLAIMER)
     print()
 
 
 def main():
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Bitcoin Trading Signal Bot")
+    parser = argparse.ArgumentParser(
+        description="Bitcoin Trading Signal Bot (ADVISORY ONLY - never places trades)"
+    )
     parser.add_argument("--loop", action="store_true", help="Run continuously")
     parser.add_argument("--backtest", action="store_true", help="Run backtest on historical data")
     parser.add_argument("--interval", type=int, default=None,
@@ -164,17 +216,10 @@ def main():
 
     print(BANNER)
 
-    # Login to Robinhood
-    username = os.getenv("ROBINHOOD_USERNAME")
-    password = os.getenv("ROBINHOOD_PASSWORD")
-    totp = os.getenv("ROBINHOOD_TOTP") or None
+    # Get credentials — prompts interactively if not in .env
+    username, password, totp = get_credentials()
 
-    if not username or not password:
-        print("  ERROR: Set ROBINHOOD_USERNAME and ROBINHOOD_PASSWORD in .env file.")
-        print("  Copy .env.example to .env and fill in your credentials.")
-        sys.exit(1)
-
-    print("  Logging in to Robinhood...")
+    print("  Logging in to Robinhood (read-only data access)...")
     try:
         data_fetcher.login(username, password, totp)
     except Exception as e:

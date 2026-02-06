@@ -1,5 +1,11 @@
 """
 Fetches Bitcoin price data from Robinhood using robin_stocks.
+
+IMPORTANT: This module is READ-ONLY. It fetches market data only.
+It must NEVER import or call any order/trading functions such as:
+  - rh.orders.*
+  - rh.crypto.order_*
+  - Any function that places, modifies, or cancels trades.
 """
 
 import robin_stocks.robinhood as rh
