@@ -1,82 +1,80 @@
-# Bitcoin Trading Signal Bot
+# Penny-Stock Day-Trading Signal Bot
 
-A Python bot that fetches Bitcoin price data from Robinhood and generates **buy/sell signals** using technical analysis indicators.
+A Python bot that scans US stocks for day-trading opportunities and flags
+**BUY / HOLD / SELL** signals using technical analysis. It does **NOT place
+trades** — every decision is yours to execute manually.
 
-> **Disclaimer**: This bot provides signals for educational/informational purposes only. It does NOT execute trades automatically. Use at your own risk. Past performance does not guarantee future results.
+> **Disclaimer**: Signals are for educational / informational purposes only.
+> Penny stocks are highly volatile. Past performance does not guarantee future
+> results. Use at your own risk.
 
-## Indicators Used
+## What it flags
 
-| Indicator | Weight | Buy Signal | Sell Signal |
-|-----------|--------|------------|-------------|
-| **RSI (14)** | ±30 pts | RSI < 30 (oversold) | RSI > 70 (overbought) |
-| **MACD** | ±25 pts | Bullish crossover | Bearish crossover |
-| **Bollinger Bands** | ±25 pts | Price at lower band | Price at upper band |
-| **EMA 9/21** | ±20 pts | Bullish crossover | Bearish crossover |
+**1. Buy candidates (the screener)**
+Scans the market each cycle for US stocks that are:
+- Priced between **$0.50 and $2.00**
+- Up **at least 3% today**
+- Trading at least **1,000,000 shares** today
 
-Combined score from -100 to +100 maps to: **STRONG BUY / BUY / HOLD / SELL / STRONG SELL**
+Then it scores each match on technical indicators and prints the top BUY-grade
+names.
+
+**2. Sell / Hold on your own positions**
+Reads tickers from `watchlist.txt` (one per line — add whatever you bought)
+and flags **SELL** when the technicals turn bearish, **HOLD** otherwise.
+In the final 5 minutes of the trading day (15:55–16:00 ET) it force-flags
+everything on the watchlist as SELL — day-trading rule, no overnight holds.
+
+## Indicators used
+
+| Indicator | Weight | Bullish | Bearish |
+|-----------|--------|---------|---------|
+| **RSI (14)**        | +/- 25 | RSI < 30 | RSI > 70 |
+| **MACD**            | +/- 20 | Bullish crossover | Bearish crossover |
+| **Bollinger Bands** | +/- 20 | Price at lower band | Price at upper band |
+| **EMA 9/21**        | +/- 15 | Bullish crossover | Bearish crossover |
+| **VWAP**            | +/- 10 | Price above VWAP | Price below VWAP |
+| **Volume surge**    | +/- 10 | 2x+ avg volume | 0.5x or less |
+
+Total score is clamped to -100 .. +100 and mapped to:
+STRONG BUY / BUY / HOLD / SELL / STRONG SELL.
 
 ## Setup
 
-1. **Clone and install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-2. **Configure credentials:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your Robinhood username and password
-   ```
-
-3. **If you use 2FA**, add your TOTP secret to `.env` (also install `pyotp`):
-   ```bash
-   pip install pyotp
-   ```
+No API keys, no logins — `yfinance` pulls public market data directly.
 
 ## Usage
 
 ```bash
-# Run once — get a single buy/sell signal
-python bot.py
-
-# Run continuously (checks every 15 minutes by default)
-python bot.py --loop
-
-# Custom interval (e.g., every 5 minutes)
-python bot.py --loop --interval 5
-
-# Backtest on the past year of daily data
-python bot.py --backtest
+python bot.py                  # One scan, then exit
+python bot.py --loop           # Loop, scanning every 5 min (default)
+python bot.py --loop -i 10     # Loop, 10-min interval
+python bot.py --scan-only      # Just show buy candidates
+python bot.py --watch-only     # Just check watchlist.txt
 ```
 
-## Example Output
+## Editing your watchlist
+
+Open `watchlist.txt` and put one ticker per line:
 
 ```
-  Time:       2026-02-06 14:30:00
-  BTC Price:  $69,969.81
-  Signal:     🟢 BUY
-  Score:      +35.0 / 100
-
-  Indicators:
-    RSI (14):        32.4
-    MACD:            BULLISH CROSS
-    Bollinger Bands: LOWER HALF
-    EMA 9/21:        BEARISH
-
-  Reasoning:
-    - RSI oversold at 32.4 (+8)
-    - MACD bullish crossover (+25)
-    - Price below BB midline (+5)
-    - EMA 9 below EMA 21 (-8)
+SNDL
+NAKD
+BBIG
 ```
 
-## Project Structure
+Lines starting with `#` or blank lines are ignored.
+
+## Project structure
 
 ```
-├── bot.py            # Main entry point
-├── data_fetcher.py   # Robinhood data retrieval
-├── signals.py        # Technical analysis & signal generation
-├── requirements.txt  # Python dependencies
-├── .env.example      # Credential template
-└── .gitignore
+bot.py             # Entry point: scan + watchlist flow
+data_fetcher.py    # yfinance screener + intraday bar fetch
+signals.py         # Technical analysis + scoring
+watchlist.txt      # Tickers you currently hold
+requirements.txt   # Python dependencies
 ```
