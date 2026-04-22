@@ -1,8 +1,17 @@
 # Tickers you currently hold. One per line. Blank lines and lines starting
-# with '#' are ignored. The bot will flag SELL / HOLD signals for each of
-# these based on intraday technicals, and force-flag SELL in the last 5
-# minutes of the trading day (day-trading rule: no overnight holds).
+# with '#' are ignored.
 #
-# Example:
-#   AAPL
-#   SNDL
+# Two supported formats:
+#   TICKER                  -> bot decides SELL/HOLD from technicals only
+#   TICKER  ENTRY_PRICE     -> bot also uses your entry price for:
+#                                - SELL at +5% take-profit (default)
+#                                - SELL at -3% stop-loss   (default)
+#                                - live P&L printed each scan
+#
+# All watchlist tickers are force-flagged SELL in the last 5 min of the
+# trading day (15:55-16:00 ET). Day-trading rule: no overnight holds.
+#
+# Examples:
+#   SNDL 1.50
+#   ACRV 1.95
+#   BLNK
