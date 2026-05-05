@@ -6,13 +6,18 @@ Uses multiple indicators to generate buy/sell signals:
 - MACD (Moving Average Convergence Divergence)
 - Bollinger Bands
 - EMA Crossover (9/21)
+
+Plus a fast-mover gate (ATR%, ROC, volume surge, range expansion) so
+slow / sideways tape is filtered out — we only want directional moves
+worth a day trade.
 """
 
+import os
 import pandas as pd
 import numpy as np
-from ta.momentum import RSIIndicator
+from ta.momentum import RSIIndicator, ROCIndicator
 from ta.trend import MACD, EMAIndicator
-from ta.volatility import BollingerBands
+from ta.volatility import BollingerBands, AverageTrueRange
 from dataclasses import dataclass
 from enum import Enum
 
@@ -34,12 +39,27 @@ class AnalysisResult:
     macd_signal: str
     bb_signal: str
     ema_signal: str
+    velocity_score: float  # 0 to 100 — how "fast" the tape is moving
+    fast_mover: bool
+    atr_pct: float
+    roc_pct: float
+    volume_surge: float
     reasons: list[str]
+
+
+# Fast-mover thresholds. Tuned for hourly BTC data; override via env.
+ATR_PCT_MIN = float(os.getenv("FAST_MOVER_ATR_PCT", "0.5"))      # ATR as % of price
+ROC_PCT_MIN = float(os.getenv("FAST_MOVER_ROC_PCT", "0.8"))      # |ROC over 6 bars|
+VOL_SURGE_MIN = float(os.getenv("FAST_MOVER_VOL_SURGE", "1.2"))  # vol vs 20-bar avg
+VELOCITY_MIN = float(os.getenv("FAST_MOVER_VELOCITY_MIN", "55")) # composite cutoff
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """Add all technical indicators to the dataframe."""
     close = df["close"]
+    high = df["high"]
+    low = df["low"]
+    volume = df["volume"]
 
     # RSI (14-period)
     df["rsi"] = RSIIndicator(close=close, window=14).rsi()
@@ -60,7 +80,39 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema_9"] = EMAIndicator(close=close, window=9).ema_indicator()
     df["ema_21"] = EMAIndicator(close=close, window=21).ema_indicator()
 
+    # --- Fast-mover indicators ---
+    # ATR (14) and ATR as % of price — measures realized volatility
+    atr = AverageTrueRange(high=high, low=low, close=close, window=14)
+    df["atr"] = atr.average_true_range()
+    df["atr_pct"] = (df["atr"] / close) * 100
+
+    # Rate of Change over the last 6 bars — short-term momentum %
+    df["roc_6"] = ROCIndicator(close=close, window=6).roc()
+
+    # Volume surge: current vs 20-bar simple moving average
+    df["vol_sma_20"] = volume.rolling(window=20, min_periods=5).mean()
+    df["vol_surge"] = volume / df["vol_sma_20"].replace(0, np.nan)
+
+    # Range expansion: current bar range vs avg of prior 20 bars
+    df["bar_range"] = high - low
+    df["range_avg_20"] = df["bar_range"].rolling(window=20, min_periods=5).mean()
+    df["range_expansion"] = df["bar_range"] / df["range_avg_20"].replace(0, np.nan)
+
     return df
+
+
+def _velocity_score(atr_pct: float, roc_abs: float, vol_surge: float,
+                    range_exp: float) -> float:
+    """
+    Composite 0–100 score representing how fast the tape is moving.
+    Each component is scaled relative to its threshold and capped.
+    """
+    # Each component contributes up to 25 points.
+    atr_pts = min(25.0, (atr_pct / ATR_PCT_MIN) * 15) if ATR_PCT_MIN > 0 else 0
+    roc_pts = min(25.0, (roc_abs / ROC_PCT_MIN) * 15) if ROC_PCT_MIN > 0 else 0
+    vol_pts = min(25.0, (vol_surge / VOL_SURGE_MIN) * 15) if VOL_SURGE_MIN > 0 else 0
+    rng_pts = min(25.0, range_exp * 12.5)  # 2x avg range = full 25 pts
+    return max(0.0, atr_pts + roc_pts + vol_pts + rng_pts)
 
 
 def analyze(df: pd.DataFrame) -> AnalysisResult:
@@ -72,6 +124,10 @@ def analyze(df: pd.DataFrame) -> AnalysisResult:
       MACD:      up to +/- 25 points
       Bollinger: up to +/- 25 points
       EMA cross: up to +/- 20 points
+
+    The fast-mover gate then checks whether the tape is moving fast
+    enough to be worth a day trade. If not, BUY/SELL signals are
+    downgraded to HOLD with a "slow tape" reason.
     """
     df = compute_indicators(df)
     latest = df.iloc[-1]
@@ -86,15 +142,14 @@ def analyze(df: pd.DataFrame) -> AnalysisResult:
         pts = 30 * (30 - rsi) / 30  # stronger signal the lower RSI goes
         score += pts
         reasons.append(f"RSI oversold at {rsi:.1f} (+{pts:.0f})")
-        rsi_label = "OVERSOLD"
     elif rsi > 70:
         pts = 30 * (rsi - 70) / 30
         score -= pts
         reasons.append(f"RSI overbought at {rsi:.1f} (-{pts:.0f})")
-        rsi_label = "OVERBOUGHT"
     else:
-        rsi_label = "NEUTRAL"
         reasons.append(f"RSI neutral at {rsi:.1f}")
+
+    rsi_label = "OVERSOLD" if rsi < 30 else "OVERBOUGHT" if rsi > 70 else "NEUTRAL"
 
     # --- MACD Analysis (max +/- 25) ---
     macd_val = latest["macd"]
@@ -168,7 +223,33 @@ def analyze(df: pd.DataFrame) -> AnalysisResult:
         reasons.append("EMA 9 below EMA 21 (-8)")
         ema_label = "BEARISH"
 
-    # --- Determine overall signal ---
+    # --- Fast-mover gate -------------------------------------------------
+    atr_pct = float(latest.get("atr_pct") or 0.0)
+    roc_pct = float(latest.get("roc_6") or 0.0)
+    vol_surge = float(latest.get("vol_surge") or 0.0)
+    range_exp = float(latest.get("range_expansion") or 0.0)
+    if np.isnan(atr_pct):
+        atr_pct = 0.0
+    if np.isnan(roc_pct):
+        roc_pct = 0.0
+    if np.isnan(vol_surge):
+        vol_surge = 0.0
+    if np.isnan(range_exp):
+        range_exp = 0.0
+
+    velocity = _velocity_score(atr_pct, abs(roc_pct), vol_surge, range_exp)
+    fast_mover = (
+        velocity >= VELOCITY_MIN
+        and atr_pct >= ATR_PCT_MIN
+        and abs(roc_pct) >= ROC_PCT_MIN
+    )
+
+    reasons.append(
+        f"Velocity {velocity:.0f}/100 (ATR%={atr_pct:.2f}, "
+        f"ROC6={roc_pct:+.2f}%, vol×{vol_surge:.2f})"
+    )
+
+    # Determine raw directional signal first
     score = max(-100, min(100, score))
     if score >= 50:
         signal = Signal.STRONG_BUY
@@ -181,6 +262,15 @@ def analyze(df: pd.DataFrame) -> AnalysisResult:
     else:
         signal = Signal.HOLD
 
+    # Slow tape gate: don't day-trade chop. Downgrade actionable signals.
+    if not fast_mover and signal != Signal.HOLD:
+        reasons.append(
+            f"SLOW TAPE — signal {signal.value} suppressed "
+            f"(need ATR%>={ATR_PCT_MIN}, |ROC6|>={ROC_PCT_MIN}%, "
+            f"velocity>={VELOCITY_MIN:.0f})"
+        )
+        signal = Signal.HOLD
+
     return AnalysisResult(
         signal=signal,
         score=score,
@@ -189,5 +279,10 @@ def analyze(df: pd.DataFrame) -> AnalysisResult:
         macd_signal=macd_label,
         bb_signal=bb_label,
         ema_signal=ema_label,
+        velocity_score=velocity,
+        fast_mover=fast_mover,
+        atr_pct=atr_pct,
+        roc_pct=roc_pct,
+        volume_surge=vol_surge,
         reasons=reasons,
     )

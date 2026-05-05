@@ -87,18 +87,23 @@ def format_result(result: signals.AnalysisResult) -> str:
     }
 
     icon = signal_colors[result.signal]
+    tape_label = "FAST MOVER" if result.fast_mover else "slow tape (skip day trade)"
     lines = [
         "",
         f"  Time:       {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"  BTC Price:  ${result.price:,.2f}",
         f"  Signal:     {icon} {result.signal.value}",
         f"  Score:      {result.score:+.1f} / 100",
+        f"  Velocity:   {result.velocity_score:.0f} / 100  [{tape_label}]",
         "",
         "  Indicators:",
         f"    RSI (14):        {result.rsi:.1f}",
         f"    MACD:            {result.macd_signal}",
         f"    Bollinger Bands: {result.bb_signal}",
         f"    EMA 9/21:        {result.ema_signal}",
+        f"    ATR %:           {result.atr_pct:.2f}%",
+        f"    ROC (6 bars):    {result.roc_pct:+.2f}%",
+        f"    Volume surge:    {result.volume_surge:.2f}x",
         "",
         "  Reasoning:",
     ]
