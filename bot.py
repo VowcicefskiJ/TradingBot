@@ -61,9 +61,15 @@ DEFAULT_POSITION_USD = 150.0
 DEFAULT_TAKE_PROFIT_PCT = 5.0
 DEFAULT_STOP_LOSS_PCT = 3.0
 
+# Standard quality gates
 MAX_PCT_CHANGE_FOR_PICK = 15.0
 MAX_RSI_FOR_PICK = 65.0
 MIN_SCORE_FOR_PICK = 25.0
+
+# Looser gates for --fast mode (chasing fast movers is the whole point)
+FAST_MAX_PCT_CHANGE = 30.0
+FAST_MAX_RSI = 75.0
+FAST_MIN_SCORE = 20.0
 
 
 @dataclass
@@ -77,6 +83,7 @@ class TradeConfig:
     position_usd: float
     take_profit_pct: float
     stop_loss_pct: float
+    fast_mode: bool = False
 
 
 def signal_icon(sig: signals.Signal) -> str:
@@ -122,25 +129,40 @@ def print_candidate(res: signals.AnalysisResult, pct_change: float | None = None
           f"   score {res.score:+.0f}   {res.signal.value}")
     print(f"        RSI {res.rsi:>5.1f} | MACD {res.macd_signal} | "
           f"BB {res.bb_signal} | EMA {res.ema_signal} | "
-          f"VWAP {res.vwap_signal} | Vol {res.volume_signal}")
+          f"VWAP {res.vwap_signal} | Vol {res.volume_signal} | "
+          f"Mom {res.momentum_signal}")
     for r in res.reasons[:3]:
         print(f"        - {r}")
 
 
-def passes_quality_gate(res: signals.AnalysisResult, pct_change: float) -> tuple[bool, str]:
-    """Decide if a candidate is clean enough to be the top pick."""
-    if res.score < MIN_SCORE_FOR_PICK:
-        return False, f"score {res.score:+.0f} below +{MIN_SCORE_FOR_PICK:.0f}"
-    if pct_change > MAX_PCT_CHANGE_FOR_PICK:
+def passes_quality_gate(
+    res: signals.AnalysisResult, pct_change: float, fast: bool = False
+) -> tuple[bool, str]:
+    """
+    Decide if a candidate is clean enough to be the top pick.
+
+    Fast mode loosens the chasing/RSI/score gates because the whole point of
+    fast-mover mode is catching stocks already in motion.
+    """
+    min_score = FAST_MIN_SCORE if fast else MIN_SCORE_FOR_PICK
+    max_pct = FAST_MAX_PCT_CHANGE if fast else MAX_PCT_CHANGE_FOR_PICK
+    max_rsi = FAST_MAX_RSI if fast else MAX_RSI_FOR_PICK
+
+    if res.score < min_score:
+        return False, f"score {res.score:+.0f} below +{min_score:.0f}"
+    if pct_change > max_pct:
         return False, f"already up {pct_change:.1f}% today (chasing)"
-    if res.rsi > MAX_RSI_FOR_PICK:
-        return False, f"RSI {res.rsi:.1f} near overbought"
-    if res.bb_signal == "OVERBOUGHT":
+    if res.rsi > max_rsi:
+        return False, f"RSI {res.rsi:.1f} too overbought"
+    if res.bb_signal == "OVERBOUGHT" and not fast:
         return False, "price at upper Bollinger Band (overbought)"
     if res.volume_signal == "WEAK":
         return False, "volume too weak to trust the move"
     if res.vwap_signal == "BELOW":
         return False, "price below VWAP (intraday downtrend)"
+    # Fast mode: also require recent momentum to be UP, not flat or fading
+    if fast and res.momentum_signal in ("FADING", "FAST DOWN", "FLAT", "N/A"):
+        return False, f"recent momentum {res.momentum_signal} (not accelerating)"
     return True, ""
 
 
@@ -167,7 +189,7 @@ def print_top_pick(
     chosen: tuple[signals.AnalysisResult, float] | None = None
     rejections: list[tuple[str, str]] = []
     for res, pct in scored:
-        ok, why = passes_quality_gate(res, pct)
+        ok, why = passes_quality_gate(res, pct, fast=cfg.fast_mode)
         if ok:
             chosen = (res, pct)
             break
@@ -223,7 +245,20 @@ def scan_buy_candidates(cfg: TradeConfig, limit: int = 5):
         except Exception:
             continue
 
-    scored.sort(key=lambda x: x[0].score, reverse=True)
+    # Fast mode prefers candidates with FAST UP momentum; standard mode ranks
+    # by pure technical score.
+    if cfg.fast_mode:
+        scored.sort(
+            key=lambda x: (
+                x[0].momentum_signal == "FAST UP",
+                x[0].momentum_signal == "BUILDING",
+                x[0].score,
+            ),
+            reverse=True,
+        )
+    else:
+        scored.sort(key=lambda x: x[0].score, reverse=True)
+
     buy_grade = [s for s in scored
                  if s[0].signal in (signals.Signal.BUY, signals.Signal.STRONG_BUY)]
 
@@ -351,6 +386,10 @@ def main():
                         help="Only show buy candidates + top pick, skip watchlist")
     parser.add_argument("--watch-only", action="store_true",
                         help="Only check watchlist.txt, skip the screener")
+    parser.add_argument("--fast", action="store_true",
+                        help="Fast-movers mode: prioritize stocks accelerating "
+                             "in the last 30 min; relaxes chase/RSI/score gates "
+                             "(higher reward, higher risk)")
     args = parser.parse_args()
 
     if args.scan_only and args.watch_only:
@@ -361,11 +400,14 @@ def main():
         position_usd=args.size,
         take_profit_pct=args.target,
         stop_loss_pct=args.stop,
+        fast_mode=args.fast,
     )
     scan = not args.watch_only
     watch = not args.scan_only
 
     print(BANNER)
+    if args.fast:
+        print("  [FAST MOVERS MODE] prioritizing stocks accelerating in last 30 min")
 
     if args.loop:
         run_loop(args.interval, scan, watch, cfg)

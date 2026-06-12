@@ -43,6 +43,7 @@ class AnalysisResult:
     ema_signal: str
     vwap_signal: str
     volume_signal: str
+    momentum_signal: str
     reasons: list[str]
 
 
@@ -70,6 +71,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vwap"] = cum_vp / cum_vol
 
     df["vol_avg_20"] = df["volume"].rolling(window=20).mean()
+
+    # Recent momentum: % price change over the last 6 bars (~30 min on 5m bars).
+    # Used to surface FAST MOVERS — stocks accelerating in the recent window.
+    df["roc_30m"] = df["close"].pct_change(periods=6) * 100
 
     return df
 
@@ -228,6 +233,29 @@ def analyze(df: pd.DataFrame, ticker: str = "") -> AnalysisResult:
         else:
             volume_label = "NORMAL"
 
+    # Recent momentum (fast-mover detection) — 30-min rate of change.
+    roc = latest["roc_30m"]
+    if pd.isna(roc):
+        momentum_label = "N/A"
+    elif roc >= 3.0:
+        score += 15
+        reasons.append(f"FAST MOVER: +{roc:.1f}% in last 30 min (+15)")
+        momentum_label = "FAST UP"
+    elif roc >= 1.5:
+        score += 8
+        reasons.append(f"Building momentum: +{roc:.1f}% in 30 min (+8)")
+        momentum_label = "BUILDING"
+    elif roc <= -3.0:
+        score -= 15
+        reasons.append(f"Fast drop: {roc:.1f}% in 30 min (-15)")
+        momentum_label = "FAST DOWN"
+    elif roc <= -1.5:
+        score -= 8
+        reasons.append(f"Losing momentum: {roc:.1f}% in 30 min (-8)")
+        momentum_label = "FADING"
+    else:
+        momentum_label = "FLAT"
+
     score = max(-100, min(100, score))
     if score >= 50:
         signal = Signal.STRONG_BUY
@@ -251,5 +279,6 @@ def analyze(df: pd.DataFrame, ticker: str = "") -> AnalysisResult:
         ema_signal=ema_label,
         vwap_signal=vwap_label,
         volume_signal=volume_label,
+        momentum_signal=momentum_label,
         reasons=reasons,
     )
