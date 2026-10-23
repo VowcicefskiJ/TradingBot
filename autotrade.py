@@ -4,25 +4,28 @@ Autonomous stock trader.
 
 Finds stocks up a high % today, buys a fixed dollar amount of the ones whose
 intraday momentum still looks healthy, and sells automatically at a profit
-target (or a stop loss) using bracket orders held at the broker.
+target (or a stop loss).
 
-Uses an Alpaca PAPER account (fake money) unless you explicitly opt in to live.
+Brokers (set BROKER in .env):
+  alpaca     Paper account (fake money) by default.
+  robinhood  Your real Robinhood account: REAL MONEY, always.
 
 Usage:
-    python autotrade.py              # run on its own, all day, every day
     python autotrade.py --dry-run    # scan and log decisions, place no orders
+    python autotrade.py              # Alpaca paper trading on its own
+    python autotrade.py --live       # real money (Robinhood, or Alpaca with ALPACA_PAPER=false)
     python autotrade.py --once       # run a single cycle and exit
-    python autotrade.py --live       # real money (also needs ALPACA_PAPER=false)
 """
 
 import argparse
+import getpass
 import logging
 import os
 import sys
 
 from dotenv import load_dotenv
 
-from autotrader.broker import AlpacaBroker
+from autotrader.broker import AlpacaBroker, BrokerError
 from autotrader.config import Config
 from autotrader.trader import AutoTrader
 
@@ -39,13 +42,34 @@ def setup_logging(log_dir: str) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+def robinhood_credentials() -> tuple[str, str, str | None]:
+    """From .env if set, otherwise asked for here. The password is never written to disk."""
+    username = os.getenv("ROBINHOOD_USERNAME", "").strip()
+    password = os.getenv("ROBINHOOD_PASSWORD", "").strip()
+    totp = os.getenv("ROBINHOOD_TOTP", "").strip() or None
+    if not username or not password or username == "your_email@example.com":
+        print("  ── Robinhood Login ──────────────────────────")
+        username = input("  Email:    ").strip()
+        password = getpass.getpass("  Password: ")
+        totp = input("  2FA TOTP secret (press Enter to skip): ").strip() or None
+    return username, password, totp
+
+
+def make_broker(cfg: Config):
+    if cfg.broker == "alpaca":
+        return AlpacaBroker(cfg.api_key, cfg.api_secret, paper=cfg.paper)
+    from autotrader.robinhood_broker import RobinhoodBroker
+    broker = RobinhoodBroker(*robinhood_credentials())
+    broker.login()
+    return broker
+
+
 def main() -> None:
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Autonomous momentum stock trader (Alpaca)")
+    parser = argparse.ArgumentParser(description="Autonomous momentum stock trader")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions but place no orders")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
-    parser.add_argument("--live", action="store_true",
-                        help="Allow trading real money (requires ALPACA_PAPER=false too)")
+    parser.add_argument("--live", action="store_true", help="Allow trading real money")
     parser.add_argument("--log-dir", default="logs", help="Where to write logs and the trade journal")
     args = parser.parse_args()
 
@@ -59,25 +83,36 @@ def main() -> None:
             log.error("Config: %s", p)
         sys.exit(1)
 
-    if not cfg.paper and not args.live:
-        log.error("ALPACA_PAPER=false but --live was not passed. Refusing to trade real money.")
+    real_money = not cfg.paper and not args.dry_run
+    if real_money and not args.live:
+        if cfg.broker == "robinhood":
+            log.error("Robinhood trades REAL money. Run with --dry-run first, then add --live "
+                      "when you're ready.")
+        else:
+            log.error("ALPACA_PAPER=false but --live was not passed. Refusing to trade real money.")
         sys.exit(1)
-    if cfg.paper and args.live:
+    if cfg.broker == "alpaca" and cfg.paper and args.live:
         log.error("--live passed but ALPACA_PAPER is not false. Set both to trade real money.")
         sys.exit(1)
 
-    if not cfg.paper:
+    if real_money:
         log.warning("*" * 64)
-        log.warning("LIVE TRADING: real money will be spent without asking you first.")
+        log.warning("LIVE TRADING on %s: real money will be spent without asking you first.",
+                    cfg.broker.capitalize())
         log.warning("Up to $%.0f per trade, %d positions at once.", cfg.trade_amount, cfg.max_positions)
         log.warning("*" * 64)
 
-    log.info("Settings: $%.0f per trade, max %d positions, take profit +%.1f%%, stop loss -%.1f%%, "
-             "gainers %.0f-%.0f%%, price $%.0f-$%.0f, daily loss limit %.1f%%",
-             cfg.trade_amount, cfg.max_positions, cfg.take_profit_pct, cfg.stop_loss_pct,
-             cfg.min_gain_pct, cfg.max_gain_pct, cfg.min_price, cfg.max_price, cfg.max_daily_loss_pct)
+    log.info("Broker: %s%s. $%.0f per trade, max %d positions, take profit +%.1f%%, "
+             "stop loss -%.1f%%, gainers %.0f-%.0f%%, price $%.0f-$%.0f, daily loss limit %.1f%%",
+             cfg.broker, " (paper)" if cfg.paper else "", cfg.trade_amount, cfg.max_positions,
+             cfg.take_profit_pct, cfg.stop_loss_pct, cfg.min_gain_pct, cfg.max_gain_pct,
+             cfg.min_price, cfg.max_price, cfg.max_daily_loss_pct)
 
-    broker = AlpacaBroker(cfg.api_key, cfg.api_secret, paper=cfg.paper)
+    try:
+        broker = make_broker(cfg)
+    except BrokerError as e:
+        log.error("%s", e)
+        sys.exit(1)
     trader = AutoTrader(cfg, broker, dry_run=args.dry_run, data_dir=args.log_dir)
 
     try:
@@ -86,7 +121,11 @@ def main() -> None:
         else:
             trader.run_forever()
     except KeyboardInterrupt:
-        log.info("Stopped. Open positions keep their take-profit/stop-loss orders at the broker.")
+        if broker.supports_brackets:
+            log.info("Stopped. Open positions keep their take-profit/stop-loss orders at the broker.")
+        else:
+            log.info("Stopped. Open positions keep their stop-loss at Robinhood, but the "
+                     "take-profit is only watched while the bot runs.")
 
 
 if __name__ == "__main__":

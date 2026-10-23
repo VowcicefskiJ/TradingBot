@@ -20,9 +20,12 @@ def _bool(name: str, default: bool) -> bool:
 
 @dataclass
 class Config:
+    # "alpaca" or "robinhood"
+    broker: str
     # Alpaca credentials
     api_key: str
     api_secret: str
+    # True only for an Alpaca paper account. Robinhood is always real money.
     paper: bool
 
     # How much to spend on each trade, in dollars
@@ -57,10 +60,12 @@ class Config:
 
     @classmethod
     def from_env(cls) -> "Config":
+        broker = os.getenv("BROKER", "alpaca").strip().lower()
         return cls(
+            broker=broker,
             api_key=os.getenv("ALPACA_API_KEY", "").strip(),
             api_secret=os.getenv("ALPACA_API_SECRET", "").strip(),
-            paper=_bool("ALPACA_PAPER", True),
+            paper=broker == "alpaca" and _bool("ALPACA_PAPER", True),
             trade_amount=_float("TRADE_AMOUNT", 1000.0),
             max_positions=_int("MAX_POSITIONS", 3),
             take_profit_pct=_float("TAKE_PROFIT_PCT", 4.0),
@@ -81,7 +86,9 @@ class Config:
     def validate(self) -> list[str]:
         """Return a list of problems; empty means the config is usable."""
         problems = []
-        if not self.api_key or not self.api_secret:
+        if self.broker not in ("alpaca", "robinhood"):
+            problems.append("BROKER must be 'alpaca' or 'robinhood'")
+        if self.broker == "alpaca" and (not self.api_key or not self.api_secret):
             problems.append("ALPACA_API_KEY and ALPACA_API_SECRET must be set")
         if self.trade_amount <= 0:
             problems.append("TRADE_AMOUNT must be positive")

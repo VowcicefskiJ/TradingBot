@@ -2,14 +2,14 @@
 
 This repo contains two independent tools:
 
-1. **`autotrade.py` — Autonomous stock trader.** Finds stocks that are up a high % today, buys a set dollar amount, and sells automatically when it hits a profit target (or a stop loss). Runs on its own. Uses an [Alpaca](https://alpaca.markets) **paper account (fake money) by default**.
+1. **`autotrade.py` — Autonomous stock trader.** Finds stocks that are up a high % today, buys a set dollar amount, and sells automatically when it hits a profit target (or a stop loss). Runs on its own. Trades through **Robinhood** (real money) or [Alpaca](https://alpaca.markets) (paper/fake money by default).
 2. **`bot.py` — Bitcoin signal bot.** Advisory only; never places trades.
 
 ---
 
 ## Autonomous Stock Trader
 
-> **Read this first.** No strategy reliably makes money, and momentum trading on big daily gainers is high-risk: these stocks can reverse sharply. Run this on **paper trading for weeks** and check the results in `logs/trades.csv` and your Alpaca dashboard before you even think about live money. Only ever trade money you can afford to lose. This is not financial advice.
+> **Read this first.** No strategy reliably makes money, and momentum trading on big daily gainers is high-risk: these stocks can reverse sharply. Run it with `--dry-run` (or on Alpaca paper trading) for weeks and check the results in `logs/trades.csv` before you put real money behind it. Only ever trade money you can afford to lose. This is not financial advice.
 
 ### How it works
 
@@ -31,37 +31,67 @@ Every minute while the market is open:
    | RSI ≥ 80 (overextended) | **veto: never buy** |
 
 3. **Buy.** It buys the highest-scoring stocks that reach `MIN_SCORE`, spending about `TRADE_AMOUNT` dollars each in whole shares, up to `MAX_POSITIONS` positions at once.
-4. **Sell automatically.** Each buy is a **bracket order**: Alpaca holds a take-profit sell at `+TAKE_PROFIT_PCT` and a stop-loss at `-STOP_LOSS_PCT`. These exits live at the broker, so they still fire if the bot crashes or your computer is off.
-5. **End of day.** `FLATTEN_MINUTES_BEFORE_CLOSE` minutes before the close it sells anything still open, so nothing is held overnight. Set it to `0` to hold overnight.
+4. **Sell automatically** at `+TAKE_PROFIT_PCT` (profit) or `-STOP_LOSS_PCT` (stop loss):
+   - **Alpaca:** each buy is a bracket order, so both exits live at the broker and fire even if the bot is off.
+   - **Robinhood:** Robinhood has no bracket orders. Once the buy fills, the bot places a **stop-loss order at Robinhood** (so your downside is protected even if the bot stops) and **watches the take-profit itself**, selling at market when the price reaches it. Profits are only taken while the bot is running, and it checks once per `SCAN_INTERVAL_SECONDS`.
+5. **End of day.** `FLATTEN_MINUTES_BEFORE_CLOSE` minutes before the close it sells whatever it bought that's still open, so nothing is held overnight. Set it to `0` to hold overnight.
+
+The bot **only ever sells shares it bought itself** (tracked in `logs/state.json`). Stocks you already own in the same account are never sold, and it won't buy a stock you already hold.
 
 ### Safety rails
 
-- **Paper trading by default.** Real money needs **both** `ALPACA_PAPER=false` **and** the `--live` flag.
+- **Real money needs `--live`.** Robinhood is always real money, so it refuses to place orders without `--live` (use `--dry-run` to try it out). Alpaca uses paper trading unless you set **both** `ALPACA_PAPER=false` and `--live`.
 - **Daily loss limit.** Once equity is down `MAX_DAILY_LOSS_PCT` for the day, it stops opening new trades.
 - **Pattern day trader rule.** Accounts under $25k get 3 day trades per 5 business days. The bot stops opening trades when that limit is reached rather than getting your account restricted.
 - **One trade per stock per day.** It won't keep re-buying a stock it just exited. This survives restarts (`logs/state.json`).
 - **No trading in the first 15 or last 30 minutes** of the session, when moves are most erratic.
 - `--dry-run` scans and logs exactly what it *would* buy, without placing orders.
 
-### Setup
+### Setup: Robinhood
+
+1. Install the dependencies and create your settings file:
+   ```bash
+   pip install -r requirements.txt
+   cp .env.example .env
+   ```
+2. In `.env` set `BROKER=robinhood`. Either fill in `ROBINHOOD_USERNAME` / `ROBINHOOD_PASSWORD`, or leave them blank and type them in when the bot starts (the password isn't stored).
+3. **Two-factor login.** The bot has to log back in about every 12 hours on its own. That only works unattended if you give it your authenticator-app secret in `ROBINHOOD_TOTP`: in the Robinhood app go to *Security → Two-Factor Authentication → Authenticator app*, and when it shows the QR code choose to see the text code. That base32 text is the secret. With SMS or app-approval 2FA instead, Robinhood will ask you to approve each login, so someone needs to be at the terminal.
+4. Try it with no orders first:
+   ```bash
+   python autotrade.py --dry-run
+   ```
+5. When you're happy, let it trade (real money):
+   ```bash
+   python autotrade.py --live
+   ```
+
+Things to know about Robinhood:
+
+- It connects through [`robin_stocks`](https://github.com/jmfernandes/robin_stocks), an **unofficial** library. Robinhood doesn't officially support automated trading on its stock API and can change or block it at any time, which could break the bot or flag your account.
+- **There is no paper trading** on Robinhood, so start with a small `TRADE_AMOUNT`.
+- Robinhood has no full-market "top gainers" screener. The bot combines Robinhood's Top Movers, S&P 500 up-movers and 100 Most Popular lists, so it sees fewer stocks than with Alpaca.
+- In a **cash account**, selling and re-buying with unsettled money can cause good-faith violations. In a **margin account under $25k**, the 3-day-trades rule applies; the bot stops buying once you hit it.
+
+### Setup: Alpaca (paper trading)
 
 1. Create a free account at [alpaca.markets](https://alpaca.markets), switch to **Paper Trading**, and generate API keys.
 2. Install the dependencies and configure:
    ```bash
    pip install -r requirements.txt
    cp .env.example .env
-   # put ALPACA_API_KEY / ALPACA_API_SECRET in .env and adjust the settings
+   # BROKER=alpaca, and put ALPACA_API_KEY / ALPACA_API_SECRET in .env
    ```
 
 ### Usage
 
 ```bash
 python autotrade.py --dry-run   # watch what it would do, no orders
-python autotrade.py             # trade on its own (paper account)
+python autotrade.py             # trade on its own (Alpaca paper account)
+python autotrade.py --live      # trade real money (Robinhood, or live Alpaca)
 python autotrade.py --once      # run a single cycle and exit
 ```
 
-Leave it running (for example in `tmux`, `screen`, or as a service on an always-on machine). Outside market hours it sleeps until the next open. Logs go to `logs/autotrader.log` and every buy is recorded in `logs/trades.csv`.
+Leave it running (for example in `tmux`, `screen`, or as a service on an always-on machine). Outside market hours it sleeps until the next open. Logs go to `logs/autotrader.log`, and every buy and sell is recorded in `logs/trades.csv`.
 
 ```bash
 python -m pytest tests          # run the test suite (uses a fake broker, no network)
@@ -148,6 +178,7 @@ python bot.py --backtest
 ├── autotrader/
 │   ├── config.py         # Settings from .env
 │   ├── broker.py         # Alpaca API client (orders, data, screener)
+│   ├── robinhood_broker.py  # Robinhood adapter (robin_stocks)
 │   ├── strategy.py       # Momentum scoring, sizing, exit prices
 │   └── trader.py         # Trading loop and risk checks
 ├── tests/                # Tests for the auto-trader (fake broker)

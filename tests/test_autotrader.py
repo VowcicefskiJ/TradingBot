@@ -11,7 +11,7 @@ from autotrader.trader import AutoTrader
 
 def make_config(**overrides) -> Config:
     base = dict(
-        api_key="k", api_secret="s", paper=True, trade_amount=1000.0, max_positions=2,
+        broker="alpaca", api_key="k", api_secret="s", paper=True, trade_amount=1000.0, max_positions=2,
         take_profit_pct=4.0, stop_loss_pct=2.0, min_gain_pct=5.0, max_gain_pct=30.0,
         min_price=5.0, max_price=500.0, min_volume=500_000, min_score=60.0,
         max_daily_loss_pct=3.0, flatten_minutes_before_close=10, skip_first_minutes=15,
@@ -38,7 +38,15 @@ def uptrend(n=60, start=10.0, step=0.02, seed=0):
     return start + np.cumsum(moves)
 
 
+def position(symbol, qty=1, entry=1.0, price=1.0):
+    return {"symbol": symbol, "qty": str(qty), "avg_entry_price": str(entry),
+            "current_price": str(price), "unrealized_pl": str((price - entry) * qty),
+            "unrealized_plpc": str((price - entry) / entry)}
+
+
 class FakeBroker:
+    supports_brackets = True
+
     def __init__(self, now=datetime(2026, 10, 22, 17, 0, tzinfo=timezone.utc), is_open=True,
                  gainers=None, bars=None, positions=None, account=None):
         self.now = now
@@ -49,7 +57,10 @@ class FakeBroker:
         self.account = account or {"equity": "10000", "last_equity": "10000",
                                    "buying_power": "10000", "daytrade_count": 0}
         self.orders = []
-        self.closed_all = False
+        self.open_orders = []
+        self.cancelled = []
+        self.sells = []
+        self.closed = []
 
     def get_clock(self):
         return {"timestamp": self.now.isoformat(), "is_open": self.is_open,
@@ -66,7 +77,7 @@ class FakeBroker:
         return self.positions
 
     def get_open_orders(self):
-        return []
+        return self.open_orders
 
     def get_asset(self, symbol):
         return {"tradable": True, "exchange": "NASDAQ"}
@@ -80,12 +91,48 @@ class FakeBroker:
     def get_bars(self, symbol, **kwargs):
         return self.bars[symbol]
 
-    def buy_bracket(self, symbol, qty, take_profit, stop_loss):
-        self.orders.append((symbol, qty, take_profit, stop_loss))
-        return {"id": f"order-{len(self.orders)}"}
+    def _new_order(self, symbol, side, kind):
+        order = {"id": f"order-{len(self.orders) + 1}", "symbol": symbol, "side": side, "type": kind}
+        self.orders.append(order)
+        self.open_orders.append(order)
+        return order
 
-    def close_all_positions(self):
-        self.closed_all = True
+    def buy_bracket(self, symbol, qty, take_profit, stop_loss):
+        order = self._new_order(symbol, "buy", "market")
+        order.update(qty=qty, take_profit=take_profit, stop_loss=stop_loss)
+        return order
+
+    def buy_market(self, symbol, qty):
+        order = self._new_order(symbol, "buy", "market")
+        order["qty"] = qty
+        return order
+
+    def sell_stop(self, symbol, qty, stop_price):
+        order = self._new_order(symbol, "sell", "stop")
+        order.update(qty=qty, stop=stop_price)
+        return order
+
+    def sell_market(self, symbol, qty):
+        self.sells.append((symbol, qty))
+        return self._new_order(symbol, "sell", "market")
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        self.open_orders = [o for o in self.open_orders if o["id"] != order_id]
+
+    def close_position(self, symbol, qty):
+        self.closed.append((symbol, qty))
+
+    def fill(self, symbol, qty, entry, price):
+        """Simulate the buy filling."""
+        self.open_orders = [o for o in self.open_orders
+                            if not (o["symbol"] == symbol and o["side"] == "buy")]
+        self.positions = [p for p in self.positions if p["symbol"] != symbol]
+        self.positions.append(position(symbol, qty, entry, price))
+
+
+class FakeRobinhood(FakeBroker):
+    supports_brackets = False
 
 
 # ── strategy ──────────────────────────────────────────────────────
@@ -136,11 +183,11 @@ def test_buys_best_candidates_with_bracket(tmp_path):
     trader.tick()
 
     assert len(broker.orders) == 1
-    symbol, qty, tp, sl = broker.orders[0]
-    assert symbol == "GOOD"
-    assert qty == int(1000 // round(good[-1], 10))
-    assert tp == pytest.approx(good[-1] * 1.04, abs=0.01)
-    assert sl == pytest.approx(good[-1] * 0.98, abs=0.01)
+    order = broker.orders[0]
+    assert order["symbol"] == "GOOD"
+    assert order["qty"] == int(1000 // good[-1])
+    assert order["take_profit"] == pytest.approx(good[-1] * 1.04, abs=0.01)
+    assert order["stop_loss"] == pytest.approx(good[-1] * 0.98, abs=0.01)
     assert (tmp_path / "trades.csv").exists()
 
     # Same symbol is not bought twice in one day.
@@ -157,12 +204,12 @@ def test_dry_run_places_no_orders(tmp_path):
 
 def test_respects_max_positions(tmp_path):
     good = uptrend()
-    held = [{"symbol": s, "qty": "1", "avg_entry_price": "1", "current_price": "1",
-             "unrealized_pl": "0", "unrealized_plpc": "0"} for s in ("A", "B")]
-    broker = FakeBroker(gainers=[gainer("GOOD", 12, good[-1])],
-                        bars={"GOOD": make_bars(good)}, positions=held)
-    AutoTrader(make_config(max_positions=2), broker, data_dir=str(tmp_path)).tick()
-    assert broker.orders == []
+    broker = FakeBroker(gainers=[gainer("GOOD", 12, good[-1]), gainer("NEXT", 10, good[-1])],
+                        bars={"GOOD": make_bars(good), "NEXT": make_bars(good)})
+    trader = AutoTrader(make_config(max_positions=1), broker, data_dir=str(tmp_path))
+    trader.tick()
+    trader.tick()
+    assert len(broker.orders) == 1
 
 
 def test_daily_loss_limit_stops_buying(tmp_path):
@@ -191,12 +238,27 @@ def test_no_buys_right_after_open(tmp_path):
     assert broker.orders == []
 
 
-def test_flattens_before_close(tmp_path):
-    held = [{"symbol": "A", "qty": "1", "avg_entry_price": "1", "current_price": "1",
-             "unrealized_pl": "0", "unrealized_plpc": "0"}]
-    broker = FakeBroker(now=datetime(2026, 10, 22, 19, 55, tzinfo=timezone.utc), positions=held)
+def test_flattens_only_the_bots_positions(tmp_path):
+    good = uptrend()
+    broker = FakeBroker(gainers=[gainer("GOOD", 12, good[-1])], bars={"GOOD": make_bars(good)})
+    trader = AutoTrader(make_config(), broker, data_dir=str(tmp_path))
+    trader.tick()
+    qty = broker.orders[0]["qty"]
+    # The bot's buy fills; the user also owns an unrelated stock and extra GOOD shares.
+    broker.fill("GOOD", qty + 5, good[-1], good[-1])
+    broker.positions.append(position("MINE", 10, 50, 55))
+
+    broker.now = datetime(2026, 10, 22, 19, 55, tzinfo=timezone.utc)
+    trader.tick()
+    assert broker.closed == [("GOOD", qty)]
+
+
+def test_does_not_buy_stocks_you_already_own(tmp_path):
+    good = uptrend()
+    broker = FakeBroker(gainers=[gainer("GOOD", 12, good[-1])], bars={"GOOD": make_bars(good)},
+                        positions=[position("GOOD", 3, 9, 10)])
     AutoTrader(make_config(), broker, data_dir=str(tmp_path)).tick()
-    assert broker.closed_all
+    assert broker.orders == []
 
 
 def test_market_closed_does_nothing(tmp_path):
@@ -209,3 +271,94 @@ def test_config_validation():
     assert make_config().validate() == []
     assert make_config(api_key="").validate()
     assert make_config(min_gain_pct=40).validate()
+
+
+# ── exits managed by the bot (Robinhood: no bracket orders) ───────
+
+def start_rh_trade(tmp_path):
+    good = uptrend()
+    broker = FakeRobinhood(gainers=[gainer("GOOD", 12, good[-1])], bars={"GOOD": make_bars(good)})
+    trader = AutoTrader(make_config(), broker, data_dir=str(tmp_path))
+    trader.tick()
+    assert [o["type"] for o in broker.orders] == ["market"]
+    return broker, trader, broker.orders[0]["qty"]
+
+
+def test_rh_places_stop_after_fill_anchored_to_fill_price(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=10.05)
+    trader.tick()
+    stop = broker.orders[-1]
+    assert stop["type"] == "stop" and stop["qty"] == qty and stop["stop"] == 9.80
+    assert trader.state["managed"]["GOOD"]["take_profit"] == 10.40
+
+    # Next tick doesn't place a second stop.
+    trader.tick()
+    assert sum(o["type"] == "stop" for o in broker.orders) == 1
+
+
+def test_rh_takes_profit(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=10.05)
+    trader.tick()
+    stop_id = broker.orders[-1]["id"]
+
+    broker.fill("GOOD", qty, entry=10.00, price=10.45)
+    trader.tick()
+    assert stop_id in broker.cancelled
+    assert broker.sells == [("GOOD", qty)]
+
+    # Sell pending: nothing more happens.
+    trader.tick()
+    assert broker.sells == [("GOOD", qty)]
+
+    # Sell filled: position gone, bot forgets it.
+    broker.positions, broker.open_orders = [], []
+    trader.tick()
+    assert trader.state["managed"] == {}
+
+
+def test_rh_stop_fills_at_broker(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=10.05)
+    trader.tick()
+    broker.positions, broker.open_orders = [], []
+    trader.tick()
+    assert trader.state["managed"] == {} and broker.sells == []
+    assert "CLOSED AT BROKER" in (tmp_path / "trades.csv").read_text()
+
+
+def test_rh_sells_if_price_below_stop_without_stop_order(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=9.70)
+    trader.tick()
+    assert broker.sells == [("GOOD", qty)]
+
+
+def test_rh_retries_rejected_sell(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=10.05)
+    trader.tick()
+    broker.fill("GOOD", qty, entry=10.00, price=10.45)
+    trader.tick()
+    broker.open_orders = []  # the sell was rejected; shares still held
+    trader.tick()
+    assert broker.sells == [("GOOD", qty), ("GOOD", qty)]
+
+
+def test_rh_cancels_stale_buy(tmp_path):
+    broker, trader, _ = start_rh_trade(tmp_path)
+    buy_id = broker.orders[0]["id"]
+    broker.now += timedelta(minutes=6)
+    trader.tick()
+    assert buy_id in broker.cancelled
+    assert "GOOD" not in trader.state["managed"]
+
+
+def test_state_survives_restart(tmp_path):
+    broker, trader, qty = start_rh_trade(tmp_path)
+    broker.fill("GOOD", qty, entry=10.00, price=10.05)
+    restarted = AutoTrader(make_config(), broker, data_dir=str(tmp_path))
+    restarted.tick()
+    assert broker.orders[-1]["type"] == "stop"
+    assert sum(o["side"] == "buy" for o in broker.orders) == 1

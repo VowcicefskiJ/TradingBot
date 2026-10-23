@@ -20,6 +20,9 @@ class BrokerError(Exception):
 
 
 class AlpacaBroker:
+    # Alpaca holds take-profit and stop-loss exits itself.
+    supports_brackets = True
+
     def __init__(self, api_key: str, api_secret: str, paper: bool = True,
                  data_feed: str = "iex", timeout: float = 15.0):
         self.trading_url = PAPER_URL if paper else LIVE_URL
@@ -65,7 +68,8 @@ class AlpacaBroker:
         return self._trading("GET", "/v2/positions")
 
     def get_open_orders(self) -> list[dict]:
-        return self._trading("GET", "/v2/orders", params={"status": "open", "limit": 500})
+        return self._trading("GET", "/v2/orders",
+                             params={"status": "open", "limit": 500, "nested": "false"})
 
     def get_asset(self, symbol: str) -> dict:
         return self._trading("GET", f"/v2/assets/{symbol}")
@@ -126,6 +130,12 @@ class AlpacaBroker:
         }
         return self._trading("POST", "/v2/orders", json=order)
 
-    def close_all_positions(self) -> None:
-        """Cancel all open orders and market-sell every position."""
-        self._trading("DELETE", "/v2/positions", params={"cancel_orders": "true"})
+    def cancel_order(self, order_id: str) -> None:
+        self._trading("DELETE", f"/v2/orders/{order_id}")
+
+    def close_position(self, symbol: str, qty: int) -> None:
+        """Cancel the symbol's open orders (bracket legs) and market-sell qty shares."""
+        for order in self.get_open_orders():
+            if order["symbol"] == symbol:
+                self.cancel_order(order["id"])
+        self._trading("DELETE", f"/v2/positions/{symbol}", params={"qty": str(qty)})
