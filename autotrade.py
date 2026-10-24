@@ -15,6 +15,7 @@ Usage:
     python autotrade.py              # Alpaca paper trading on its own
     python autotrade.py --live       # real money (Robinhood, or Alpaca with ALPACA_PAPER=false)
     python autotrade.py --once       # run a single cycle and exit
+    python autotrade.py --check      # log in and show the account, no trading
 """
 
 import argparse
@@ -64,12 +65,31 @@ def make_broker(cfg: Config):
     return broker
 
 
+def check(broker) -> None:
+    """Show what the bot sees in the account, without trading."""
+    log = logging.getLogger("autotrader")
+    clock = broker.get_clock()
+    acct = broker.get_account()
+    log.info("Connected. Market is %s.", "OPEN" if clock["is_open"] else "closed")
+    log.info("Equity $%.2f (yesterday $%.2f), buying power $%.2f, day trades in last 5 days: %d",
+             float(acct["equity"]), float(acct["last_equity"]), float(acct["buying_power"]),
+             acct["daytrade_count"])
+    for p in broker.get_positions():
+        log.info("  you hold %s x%s @ $%.2f (the bot will never sell these)",
+                 p["symbol"], p["qty"], float(p["avg_entry_price"]))
+    gainers = broker.get_top_gainers(top=10)
+    log.info("Top gainers it can see: %s",
+             ", ".join(f"{g['symbol']} +{g['percent_change']:.1f}%" for g in gainers) or "none")
+
+
 def main() -> None:
     load_dotenv()
     parser = argparse.ArgumentParser(description="Autonomous momentum stock trader")
     parser.add_argument("--dry-run", action="store_true", help="Log decisions but place no orders")
     parser.add_argument("--once", action="store_true", help="Run one cycle and exit")
     parser.add_argument("--live", action="store_true", help="Allow trading real money")
+    parser.add_argument("--check", action="store_true",
+                        help="Log in, show the account and top gainers, then exit (no trading)")
     parser.add_argument("--log-dir", default="logs", help="Where to write logs and the trade journal")
     args = parser.parse_args()
 
@@ -83,7 +103,7 @@ def main() -> None:
             log.error("Config: %s", p)
         sys.exit(1)
 
-    real_money = not cfg.paper and not args.dry_run
+    real_money = not cfg.paper and not args.dry_run and not args.check
     if real_money and not args.live:
         if cfg.broker == "robinhood":
             log.error("Robinhood trades REAL money. Run with --dry-run first, then add --live "
@@ -113,6 +133,14 @@ def main() -> None:
     except BrokerError as e:
         log.error("%s", e)
         sys.exit(1)
+    if args.check:
+        try:
+            check(broker)
+        except BrokerError as e:
+            log.error("%s", e)
+            sys.exit(1)
+        return
+
     trader = AutoTrader(cfg, broker, dry_run=args.dry_run, data_dir=args.log_dir)
 
     try:

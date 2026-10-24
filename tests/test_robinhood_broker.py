@@ -138,3 +138,14 @@ def test_failed_login_raises():
     rh.login = lambda **kw: None
     with pytest.raises(BrokerError):
         RobinhoodBroker("u", "p", api=rh).login()
+
+
+def test_check_mode_reads_account_without_trading(caplog):
+    import logging
+    from autotrade import check
+    rh = fake_rh()
+    with caplog.at_level(logging.INFO, logger="autotrader"):
+        check(make(rh))
+    text = caplog.text
+    assert "Equity $9800.00" in text and "ABC" in text and "HOT +10.0%" in text
+    assert rh.calls == []

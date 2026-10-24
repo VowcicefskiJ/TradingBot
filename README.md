@@ -49,21 +49,32 @@ The bot **only ever sells shares it bought itself** (tracked in `logs/state.json
 
 ### Setup: Robinhood
 
-1. Install the dependencies and create your settings file:
+The bot has to run on **your own computer** (or a server you control), since it logs in as you. It needs Python 3.10 or newer.
+
+1. Download the code and install the dependencies:
    ```bash
+   git clone https://github.com/VowcicefskiJ/TradingBot.git
+   cd TradingBot
+   git checkout ccr-920b8963-xhgmjv
    pip install -r requirements.txt
    cp .env.example .env
    ```
-2. In `.env` set `BROKER=robinhood`. Either fill in `ROBINHOOD_USERNAME` / `ROBINHOOD_PASSWORD`, or leave them blank and type them in when the bot starts (the password isn't stored).
+   (On Windows use `copy .env.example .env`.) If `pip install` fails on the `ta` package, that's only needed by the Bitcoin signal bot. Install the trader's packages with `pip install robin_stocks pyotp pandas numpy requests python-dotenv`.
+2. Open `.env` in a text editor. `BROKER=robinhood` is already set. Either fill in `ROBINHOOD_USERNAME` / `ROBINHOOD_PASSWORD`, or leave them blank and type them in when the bot starts (the password isn't stored). Set `TRADE_AMOUNT` to what you're willing to put into each trade (it starts at $100).
 3. **Two-factor login.** The bot has to log back in about every 12 hours on its own. That only works unattended if you give it your authenticator-app secret in `ROBINHOOD_TOTP`: in the Robinhood app go to *Security → Two-Factor Authentication → Authenticator app*, and when it shows the QR code choose to see the text code. That base32 text is the secret. With SMS or app-approval 2FA instead, Robinhood will ask you to approve each login, so someone needs to be at the terminal.
-4. Try it with no orders first:
+4. Check the connection. This logs in and shows your balance, buying power, the stocks you already hold, and the gainers it can see. It places no orders:
+   ```bash
+   python autotrade.py --check
+   ```
+5. Watch it for a few days without trading. It logs every stock it looks at and exactly what it would buy:
    ```bash
    python autotrade.py --dry-run
    ```
-5. When you're happy, let it trade (real money):
+6. When you're happy, let it trade real money:
    ```bash
    python autotrade.py --live
    ```
+   Keep the terminal open and the computer awake during market hours (9:30am–4pm ET). If the bot stops, any open position keeps its stop-loss at Robinhood, but the take-profit is only watched while the bot runs. To stop it, press Ctrl+C.
 
 Things to know about Robinhood:
 
@@ -89,6 +100,7 @@ python autotrade.py --dry-run   # watch what it would do, no orders
 python autotrade.py             # trade on its own (Alpaca paper account)
 python autotrade.py --live      # trade real money (Robinhood, or live Alpaca)
 python autotrade.py --once      # run a single cycle and exit
+python autotrade.py --check     # log in and show the account, no trading
 ```
 
 Leave it running (for example in `tmux`, `screen`, or as a service on an always-on machine). Outside market hours it sleeps until the next open. Logs go to `logs/autotrader.log`, and every buy and sell is recorded in `logs/trades.csv`.
